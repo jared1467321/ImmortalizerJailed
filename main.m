@@ -37,35 +37,36 @@ void new_sceneID_updateWithSettingsDiff_transitionContext_completion(id self, SE
 
     NSString *diffDescription = [arg2 description];
 
-    if ([diffDescription containsString:@"foreground = NotSet"] || 
-        [diffDescription containsString:@"foreground = No"] || 
-        [diffDescription containsString:@"foreground = BSSettingFlagNo"] || 
-        [diffDescription containsString:@"foreground = NO"]) { 
-        return;
-    }
+
+ if ([diffDescription containsString:@"foreground = NotSet"] || 
+       [diffDescription containsString:@"foreground = No"] || 
+     [diffDescription containsString:@"foreground = BSSettingFlagNo"] || 
+     [diffDescription containsString:@"foreground = NO"]) { 
+    return;
+   }
 
     if ([diffDescription containsString:@"hostContextIdentifierForSnapshotting = 0"] || 
-        [diffDescription containsString:@"scenePresenterRenderIdentifierForSnapshotting = 0"] ||
-        [diffDescription containsString:@"targetOfEventDeferringEnvironments = (empty)"]) { 
-        return;
-    }
+      [diffDescription containsString:@"scenePresenterRenderIdentifierForSnapshotting = 0"] ||
+    [diffDescription containsString:@"targetOfEventDeferringEnvironments = (empty)"]) { 
+      return;
+   }
     
-    if ([diffDescription containsString:@"FBSceneSnapshotAction:"]) { 
-        return;
-    }
+  if ([diffDescription containsString:@"FBSceneSnapshotAction:"]) { 
+     return;
+  }
 
-    BOOL isGoingToForeground = [diffDescription containsString:@"foreground = Yes"] || 
-                                [diffDescription containsString:@"foreground = YES"] || 
+/*   BOOL isGoingToForeground = [diffDescription containsString:@"foreground = Yes"] || 
+                            [diffDescription containsString:@"foreground = YES"] || 
                                 [diffDescription containsString:@"foreground = BSSettingFlagYes"];
 
     if (!isGoingToForeground) {
         if ([diffDescription containsString:@"deactivationReasons = systemGesture"] ||
             [diffDescription containsString:@"deactivationReasons = systemAnimation"] ||
-            [diffDescription containsString:@"systemGesture, systemAnimation"]) {
+           [diffDescription containsString:@"systemGesture, systemAnimation"]) {
             return;
         }
     }
-
+*/
     return original_sceneID_updateWithSettingsDiff_transitionContext_completion(self, _cmd, arg1, arg2, arg3, arg4);
 }
 
