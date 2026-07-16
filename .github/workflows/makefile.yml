@@ -39,6 +39,9 @@ jobs:
             git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
           fi
 
+      - name: Install ldid
+        run: brew install ldid
+
       - name: Show toolchain info
         run: |
           echo "THEOS=$THEOS"
@@ -55,15 +58,4 @@ jobs:
           DYLIB="$(find .theos/obj -name 'ZImmortalizerJailed.dylib' -print -quit)"
           if [ -z "$DYLIB" ]; then
             echo "::error::Build finished but ZImmortalizerJailed.dylib was not found under .theos/obj"
-            find .theos -maxdepth 3 -type f | sort
-            exit 1
-          fi
-          echo "Found dylib at $DYLIB"
-          echo "dylib_path=$DYLIB" >> "$GITHUB_OUTPUT"
-
-      - name: Upload dylib artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZImmortalizerJailed-dylib
-          path: ${{ steps.locate.outputs.dylib_path }}
-          if-no-files-found: error
+            find .theos -maxdep
