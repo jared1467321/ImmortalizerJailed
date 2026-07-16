@@ -10,7 +10,7 @@ on:
       - "*.m"
       - "*.h"
       - "Makefile"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/makefile.yml"
 
 jobs:
   build:
@@ -39,7 +39,9 @@ jobs:
       - name: Build
         run: |
           make clean || true
-          make -j"$(sysctl -n hw.ncpu)"
+          # FINALPACKAGE=1 -> optimized, stripped release build (smaller binary,
+          # no debug symbols / build-path leakage).
+          make -j"$(sysctl -n hw.ncpu)" FINALPACKAGE=1
 
       - name: Locate built dylib
         id: locate
