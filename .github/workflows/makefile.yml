@@ -26,15 +26,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-sdks-${{ runner.os }}-v1
+          key: theos-sdks-${{ runner.os }}-v2
 
       - name: Install Theos
         if: steps.theos-cache.outputs.cache-hit != 'true'
         run: |
+          rm -rf "$THEOS"
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          # Pull SDKs over git instead of the API the installer uses —
-          # this is what keeps rate-limiting you.
-          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          # Only clone SDKs if they aren't already present
+          if [ ! -d "$THEOS/sdks/.git" ]; then
+            rm -rf "$THEOS/sdks"
+            git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          fi
 
       - name: Show toolchain info
         run: |
