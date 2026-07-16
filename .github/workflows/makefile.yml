@@ -33,7 +33,6 @@ jobs:
         run: |
           rm -rf "$THEOS"
           git clone --recursive https://github.com/theos/theos.git "$THEOS"
-          # Only clone SDKs if they aren't already present
           if [ ! -d "$THEOS/sdks/.git" ]; then
             rm -rf "$THEOS/sdks"
             git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
@@ -58,4 +57,15 @@ jobs:
           DYLIB="$(find .theos/obj -name 'ZImmortalizerJailed.dylib' -print -quit)"
           if [ -z "$DYLIB" ]; then
             echo "::error::Build finished but ZImmortalizerJailed.dylib was not found under .theos/obj"
-            find .theos -maxdep
+            find .theos -maxdepth 3 -type f | sort
+            exit 1
+          fi
+          echo "Found dylib at $DYLIB"
+          echo "dylib_path=$DYLIB" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZImmortalizerJailed-dylib
+          path: ${{ steps.locate.outputs.dylib_path }}
+          if-no-files-found: error
