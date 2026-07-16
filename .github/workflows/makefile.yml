@@ -1,0 +1,66 @@
+name: Build dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.m"
+      - "*.h"
+      - "Makefile"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    name: Build ZImmortalizerJailed.dylib
+    runs-on: macos-14
+
+    env:
+      THEOS: ${{ github.workspace }}/theos
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Theos + SDKs
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-sdks-${{ runner.os }}-v1
+
+      - name: Install Theos
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          # Pull SDKs over git instead of the API the installer uses —
+          # this is what keeps rate-limiting you.
+          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+
+      - name: Show toolchain info
+        run: |
+          echo "THEOS=$THEOS"
+          ls "$THEOS/sdks" || (echo "No SDKs found in \$THEOS/sdks" && exit 1)
+
+      - name: Build
+        run: |
+          make clean || true
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Locate built dylib
+        id: locate
+        run: |
+          DYLIB="$(find .theos/obj -name 'ZImmortalizerJailed.dylib' -print -quit)"
+          if [ -z "$DYLIB" ]; then
+            echo "::error::Build finished but ZImmortalizerJailed.dylib was not found under .theos/obj"
+            find .theos -maxdepth 3 -type f | sort
+            exit 1
+          fi
+          echo "Found dylib at $DYLIB"
+          echo "dylib_path=$DYLIB" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZImmortalizerJailed-dylib
+          path: ${{ steps.locate.outputs.dylib_path }}
+          if-no-files-found: error
