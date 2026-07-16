@@ -1,8 +1,5 @@
 name: Build dylib
 
-# Manual trigger only: go to the Actions tab, pick "Build dylib", and click
-# "Run workflow". (Also runs on pushes that touch source, which you can remove
-# if you only ever want the manual button.)
 on:
   workflow_dispatch:
   push:
@@ -24,12 +21,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache Theos + SDKs
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-sdks-${{ runner.os }}-v1
+
       - name: Install Theos
+        if: steps.theos-cache.outputs.cache-hit != 'true'
         run: |
-          # Theos bootstrap: clones Theos + its submodules and the iOS SDKs.
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-        env:
-          THEOS: ${{ github.workspace }}/theos
+          git clone --recursive https://github.com/theos/theos.git "$THEOS"
+          # Pull SDKs over git instead of the API the installer uses —
+          # this is what keeps rate-limiting you.
+          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
 
       - name: Show toolchain info
         run: |
