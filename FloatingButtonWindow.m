@@ -19,6 +19,10 @@
 
 static NSString * const kButtonCenterKey = @"buttonCenter";
 
+/* Resting opacity of the docked pill. Kept low so it reads as translucent,
+   roughly matching AssistiveTouch's idle button. */
+static const CGFloat kHandleRestingAlpha = 0.4;
+
 @interface FloatingButtonWindow () <AVAudioPlayerDelegate>
 @property (nonatomic, strong) UIButton *floatingButton;
 @property (nonatomic, strong) UIView *handleView;
@@ -65,9 +69,16 @@ static void vibrateDevice() {
                                                    object:nil];
 
         [self setupWindow];
-        [self updateAndShowToast];
         [self setupButton];
         [self setupHandle];
+
+        /* Apply the persisted on/off state (keep-alive + button colour) but do
+           NOT pop a toast on launch. */
+        [self refreshImmortalizedState];
+
+        /* Start in the docked (pill) state so launch skips the circle appearing
+           and auto-docking. Tapping the pill expands it to the circle. */
+        [self dockButtonImmediately];
     }
     return self;
 }
@@ -151,7 +162,7 @@ static void vibrateDevice() {
 
 - (void)setupHandle {
     _handleView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 15, 50)];
-    _handleView.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.7];
+    _handleView.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1.0];
     _handleView.layer.cornerRadius = 6;
     _handleView.layer.masksToBounds = YES;
     _handleView.alpha = 0;
@@ -285,31 +296,51 @@ static void vibrateDevice() {
     [self startDockTimer];
 }
 
-- (void)dockButton {
-    if (self.isDocked) return;
-    
-    self.isDocked = YES;
-    
+/* Park the pill against whichever edge the button is nearest, vertically
+   centred on the button. Shared by the animated dock and the launch-time
+   immediate dock. */
+- (void)layoutHandleAtButtonEdge {
     CGRect buttonFrame = self.floatingButton.frame;
     CGRect handleFrame = self.handleView.frame;
-    
+
     BOOL isLeftEdge = self.floatingButton.center.x < self.bounds.size.width / 2;
     CGFloat handleX = isLeftEdge ? 0 : self.bounds.size.width - handleFrame.size.width;
-    
+
     handleFrame.origin = CGPointMake(handleX, buttonFrame.origin.y + (buttonFrame.size.height - handleFrame.size.height)/2);
     self.handleView.frame = handleFrame;
-    
+}
+
+- (void)dockButton {
+    if (self.isDocked) return;
+
+    self.isDocked = YES;
+    [self layoutHandleAtButtonEdge];
+
     [UIView animateWithDuration:0.3 animations:^{
         self.floatingButton.alpha = 0;
         self.floatingButton.transform = CGAffineTransformMakeScale(0.5, 0.5);
     } completion:^(BOOL finished) {
         self.floatingButton.hidden = YES;
         self.handleView.hidden = NO;
-        
+
         [UIView animateWithDuration:0.2 animations:^{
-            self.handleView.alpha = 1;
+            self.handleView.alpha = kHandleRestingAlpha;
         }];
     }];
+}
+
+/* Same end state as dockButton but with no animation and no toast — used on
+   launch so the pill is simply already there. */
+- (void)dockButtonImmediately {
+    self.isDocked = YES;
+    [self layoutHandleAtButtonEdge];
+
+    self.floatingButton.alpha = 0;
+    self.floatingButton.transform = CGAffineTransformMakeScale(0.5, 0.5);
+    self.floatingButton.hidden = YES;
+
+    self.handleView.hidden = NO;
+    self.handleView.alpha = kHandleRestingAlpha;
 }
 
 - (void)undockButton {
@@ -415,27 +446,30 @@ static void vibrateDevice() {
         ImmortalizerSetEnabled(enabled);   /* writes defaults + posts the Darwin notify */
         self.isImmortalized = enabled;
         IMLog(@"Immortalizer turned %@", enabled ? @"ON" : @"OFF");
-        [self updateButtonColor];
-        [self updateAndShowToast];
+        [self refreshImmortalizedState];
+        [self showStatusToast];
     }];
 }
 
-- (void)updateAndShowToast {
-    NSString *subtitle = @"";
-    NSString *icon = @"";
-    NSString *appName = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
-
+/* Reflect the current on/off state without showing a toast: drive keep-alive
+   and the button colour. Safe to call on launch. */
+- (void)refreshImmortalizedState {
     if (self.isImmortalized) {
-        subtitle = @"Immortalized";
-        icon = @"hourglass.bottomhalf.fill";
         [self startKeepAlive];
     } else {
-        subtitle = @"At Rest";
-        icon = @"arrow.uturn.left.circle.fill";
         [self stopKeepAlive];
     }
+    [self updateButtonColor];
+}
 
-    CustomToastView *toastView = [[CustomToastView alloc] initWithTitle:appName subtitle:subtitle 
+/* The transient status toast, shown only in response to an explicit toggle. */
+- (void)showStatusToast {
+    NSString *appName = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+    NSString *subtitle = self.isImmortalized ? @"Immortalized" : @"At Rest";
+    NSString *icon     = self.isImmortalized ? @"hourglass.bottomhalf.fill"
+                                             : @"arrow.uturn.left.circle.fill";
+
+    CustomToastView *toastView = [[CustomToastView alloc] initWithTitle:appName subtitle:subtitle
                                     icon:[UIImage systemImageNamed:icon] autoHide:3.0];
 
     [toastView presentToastInViewController:self.rootViewController];
