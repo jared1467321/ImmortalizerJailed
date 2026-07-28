@@ -603,22 +603,29 @@ static const NSTimeInterval kKeepAliveMaxBackoff       = 30.0;
     self.nextAudioAttempt   = nil;
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    AVAudioSession *session = [AVAudioSession sharedInstance];
 
-    /* Idempotent: re-registering after a toggle-off/on shouldn't stack observers. */
-    [center removeObserver:self name:AVAudioSessionInterruptionNotification object:session];
-    [center removeObserver:self name:AVAudioSessionRouteChangeNotification   object:session];
+    /* Idempotent: re-registering after a toggle-off/on shouldn't stack observers.
+
+       Registered with `object:nil` rather than the session. Filtering on the
+       session object assumes AVFoundation always posts these with the session
+       as the notification's object — if it ever posts with nil, a filtered
+       observer silently never fires and the recovery paths below are dead code
+       you'd have no way to notice. The Ksign side has always used nil; matching
+       it costs nothing and removes the assumption. */
+    [center removeObserver:self name:AVAudioSessionInterruptionNotification object:nil];
+    [center removeObserver:self name:AVAudioSessionRouteChangeNotification   object:nil];
 
     [center addObserver:self
                selector:@selector(handleAudioInterruption:)
                    name:AVAudioSessionInterruptionNotification
-                 object:session];
+                 object:nil];
     [center addObserver:self
                selector:@selector(handleRouteChange:)
                    name:AVAudioSessionRouteChangeNotification
-                 object:session];
+                 object:nil];
 
-    IMLog(@"Started keeping the app awake");
+    IMLog(@"Started keeping the app awake (other audio playing: %@)",
+          [AVAudioSession sharedInstance].isOtherAudioPlaying ? @"yes" : @"no");
     [self startKeepAliveWatchdog];
     [self evaluateKeepAlive];
 }
@@ -627,15 +634,43 @@ static const NSTimeInterval kKeepAliveMaxBackoff       = 30.0;
     self.keepAliveWanted = NO;
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    [center removeObserver:self name:AVAudioSessionInterruptionNotification object:session];
-    [center removeObserver:self name:AVAudioSessionRouteChangeNotification   object:session];
+    [center removeObserver:self name:AVAudioSessionInterruptionNotification object:nil];
+    [center removeObserver:self name:AVAudioSessionRouteChangeNotification   object:nil];
 
     [self stopKeepAliveWatchdog];
     [self stopPlayingSilentAudio];
     self.audioFailureStreak = 0;
     self.nextAudioAttempt   = nil;
-    IMLog(@"Stopped keeping the app awake");
+    IMLog(@"Stopped keeping the app awake (other audio playing: %@)",
+          [AVAudioSession sharedInstance].isOtherAudioPlaying ? @"yes" : @"no");
+}
+
+/* --- Stall test ------------------------------------------------------------
+
+   Provoking a real interruption turned out to be hard: neither an incoming
+   call nor a Voice Memos recording displaces a silent mixWithOthers stream, so
+   the recovery code never ran and there was no way to tell whether it worked.
+
+   This stops the player deliberately. Nothing else changes — no notification is
+   faked, no state is reset — so the only thing that can bring it back is the
+   watchdog noticing on its next tick and calling through `evaluateKeepAlive`
+   into `startPlayingSilentAudio`, which is the identical path a real
+   interruption recovery takes. Within about two seconds you should see the
+   normal restart line. If you don't, the health check is broken, and no amount
+   of phone calls would have told you that. */
+- (void)debugStallKeepAlive {
+    if (!self.keepAliveWanted) {
+        IMLog(@"Stall test skipped — the keep-alive isn't running. Toggle Immortalizer on first.");
+        return;
+    }
+
+    if (!self.audioPlayer.isPlaying) {
+        IMLog(@"Stall test skipped — the player wasn't playing to begin with");
+        return;
+    }
+
+    [self.audioPlayer stop];
+    IMLog(@"Stall test: stopped the silent audio on purpose — the watchdog should bring it back within ~2s");
 }
 
 /* The health check. Cheap and safe to call from anywhere on the main thread — a
