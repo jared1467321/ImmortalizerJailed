@@ -39,6 +39,7 @@ static atomic_bool gVerboseLogging   = false;
 static atomic_bool gInvokeCompletion = false;
 static atomic_uint_fast64_t gLastDiagnosticLogMilliseconds = 0;
 static atomic_uint_fast64_t gLastForegroundLogMilliseconds = 0;
+static atomic_bool gObservedApplicationInBackground = false;
 
 NSString * const ImmortalizerStatusDidChangeNotification = @"ImmortalizerStatusDidChangeNotification";
 
@@ -329,21 +330,6 @@ static Method IMClassGetOwnInstanceMethod(Class cls, SEL selector) {
     return found;
 }
 
-static BOOL IMMethodHasExpectedSignature(Method method) {
-    if (!method || method_getNumberOfArguments(method) != 6) return NO;
-
-    char returnType[16] = {0};
-    method_getReturnType(method, returnType, sizeof(returnType));
-    if (returnType[0] != 'v') return NO;
-
-    for (unsigned int index = 2; index < 6; index++) {
-        char argumentType[16] = {0};
-        method_getArgumentType(method, index, argumentType, sizeof(argumentType));
-        if (argumentType[0] != '@') return NO;
-    }
-    return YES;
-}
-
 static Class findScenesClientClass(SEL selector) {
     const char *candidates[] = {
         "FBSWorkspaceScenesClient",
@@ -355,8 +341,7 @@ static Class findScenesClientClass(SEL selector) {
 
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         Class c = objc_getClass(candidates[i]);
-        Method method = c ? class_getInstanceMethod(c, selector) : NULL;
-        if (IMMethodHasExpectedSignature(method)) {
+        if (c && class_getInstanceMethod(c, selector)) {
             return c;
         }
     }
@@ -371,7 +356,7 @@ static Class findScenesClientClass(SEL selector) {
             const char *name = class_getName(all[i]);
             if (name && (strstr(name, "Scene") || strstr(name, "Workspace"))) {
                 Method method = class_getInstanceMethod(all[i], selector);
-                if (!IMMethodHasExpectedSignature(method)) continue;
+                if (!method) continue;
 
                 BOOL ownsMethod = IMClassGetOwnInstanceMethod(all[i], selector) != NULL;
                 if (!found ||
@@ -386,6 +371,21 @@ static Class findScenesClientClass(SEL selector) {
         free(all);
     }
     return found;
+}
+
+/* Resolve the class that actually owns the selected implementation. The prior
+   hardening pass tried to add an override to whichever candidate class first
+   exposed the selector. On some iOS versions that candidate only inherits the
+   method and is not the object receiving these updates. Hooking the real owner
+   preserves the behavior of the original working implementation while making
+   the inheritance decision explicit and diagnosable. */
+static Class IMClassOwningInstanceMethod(Class cls, SEL selector) {
+    for (Class current = cls; current; current = class_getSuperclass(current)) {
+        if (IMClassGetOwnInstanceMethod(current, selector)) {
+            return current;
+        }
+    }
+    return Nil;
 }
 
 static Class gHookTargetClass = Nil;
@@ -428,11 +428,14 @@ static BOOL IMInstallHookIfNeeded(void) {
         return NO;
     }
 
-    Class targetClass = findScenesClientClass(selector);
+    Class discoveredClass = findScenesClientClass(selector);
+    if (!discoveredClass) return NO;
+
+    Class targetClass = IMClassOwningInstanceMethod(discoveredClass, selector);
     if (!targetClass) return NO;
 
-    Method originalMethod = class_getInstanceMethod(targetClass, selector);
-    if (!IMMethodHasExpectedSignature(originalMethod)) return NO;
+    Method originalMethod = IMClassGetOwnInstanceMethod(targetClass, selector);
+    if (!originalMethod) return NO;
 
     IMP originalImplementation = method_getImplementation(originalMethod);
     if (!originalImplementation ||
@@ -440,41 +443,21 @@ static BOOL IMInstallHookIfNeeded(void) {
         return NO;
     }
 
+    /* Private Objective-C type encodings have changed across iOS releases even
+       when this selector and its calling convention remained usable. Requiring
+       one exact encoding caused compatible current releases to be rejected.
+       Preserve the original ABI-compatible hook behavior and record the actual
+       encoding in the log for future diagnosis instead of treating it as a
+       hard gate. */
+    const char *typeEncoding = method_getTypeEncoding(originalMethod);
+
     /* Publish the original before exposing the replacement. FrontBoard may call
        the method from another thread immediately after the runtime mutation. */
     original_sceneID_updateWithSettingsDiff_transitionContext_completion =
         (void (*)(id, SEL, id, id, id, id))originalImplementation;
 
-    Method ownedMethod = IMClassGetOwnInstanceMethod(targetClass, selector);
-    BOOL installedAsOverride = NO;
-
-    if (ownedMethod) {
-        method_setImplementation(ownedMethod,
-            (IMP)new_sceneID_updateWithSettingsDiff_transitionContext_completion);
-    } else {
-        /* class_getInstanceMethod can resolve a superclass method. Mutating that
-           Method would hook every sibling class too, so add a targeted override
-           to the selected class instead. */
-        const char *types = method_getTypeEncoding(originalMethod);
-        installedAsOverride = class_addMethod(targetClass,
-            selector,
-            (IMP)new_sceneID_updateWithSettingsDiff_transitionContext_completion,
-            types);
-
-        if (!installedAsOverride) {
-            /* A late runtime mutation may have added the method between the two
-               lookups. In that case, replace the newly owned method safely. */
-            ownedMethod = IMClassGetOwnInstanceMethod(targetClass, selector);
-            if (!ownedMethod) return NO;
-            installedAsOverride = YES;
-            IMP replaced = method_setImplementation(ownedMethod,
-                (IMP)new_sceneID_updateWithSettingsDiff_transitionContext_completion);
-            if (replaced && replaced != (IMP)new_sceneID_updateWithSettingsDiff_transitionContext_completion) {
-                original_sceneID_updateWithSettingsDiff_transitionContext_completion =
-                    (void (*)(id, SEL, id, id, id, id))replaced;
-            }
-        }
-    }
+    method_setImplementation(originalMethod,
+        (IMP)new_sceneID_updateWithSettingsDiff_transitionContext_completion);
 
     gHookTargetClass = targetClass;
     if (!IMHookImplementationIsInstalled(selector)) {
@@ -483,8 +466,10 @@ static BOOL IMInstallHookIfNeeded(void) {
     }
 
     IMSetHookStatus(IMHookStatusInstalled);
-    IMLog(@"Immortalizer is active and watching for background attempts (%s%@)",
-          class_getName(targetClass), installedAsOverride ? @", targeted override" : @"");
+    IMLog(@"Immortalizer is active and watching for background attempts (%s; discovered via %s; encoding %s)",
+          class_getName(targetClass),
+          class_getName(discoveredClass),
+          typeEncoding ? typeEncoding : "unknown");
     return YES;
 }
 
@@ -534,10 +519,45 @@ static void setup(void) {
                             object:nil queue:main usingBlock:^(NSNotification *note) {
             IMInstallHookIfNeeded();
         }];
+
+        /* Lifecycle reporting is intentionally independent of the private
+           scene hook. If a future iOS prevents attachment, the log must still
+           tell us whether the process actually entered the background and when
+           it returned. These notifications describe the observed UIKit state;
+           the hook's own log separately reports a background attempt that was
+           intercepted before UIKit entered that state. */
+        [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                            object:nil queue:main usingBlock:^(NSNotification *note) {
+            BOOL wasAlreadyBackgrounded = atomic_exchange(&gObservedApplicationInBackground, true);
+            if (!wasAlreadyBackgrounded) {
+                IMLog(@"App entered the background");
+            }
+
+            if (ImmortalizerCachedEnabled() &&
+                ImmortalizerHookStatus() == IMHookStatusInstalled) {
+                IMLog(@"Foreground hold did not prevent this transition — silent audio keep-alive may still keep the process running");
+                IMSetHookStatus(IMHookStatusSuspect);
+            }
+        }];
+
+        [center addObserverForName:UIApplicationWillEnterForegroundNotification
+                            object:nil queue:main usingBlock:^(NSNotification *note) {
+            if (atomic_load(&gObservedApplicationInBackground)) {
+                IMLog(@"App is returning to the foreground");
+            }
+        }];
+
         [center addObserverForName:UIApplicationDidBecomeActiveNotification
                             object:nil queue:main usingBlock:^(NSNotification *note) {
-            if (IMInstallHookIfNeeded() && ImmortalizerHookStatus() == IMHookStatusSuspect) {
-                IMLog(@"App returned to the foreground — hook health restored");
+            BOOL wasBackgrounded = atomic_exchange(&gObservedApplicationInBackground, false);
+            BOOL hookInstalled = IMInstallHookIfNeeded();
+
+            if (wasBackgrounded) {
+                IMLog(@"App is active in the foreground again");
+            }
+
+            if (hookInstalled && ImmortalizerHookStatus() == IMHookStatusSuspect) {
+                IMLog(@"Foreground hook health restored");
                 IMSetHookStatus(IMHookStatusInstalled);
             }
         }];
