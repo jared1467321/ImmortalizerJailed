@@ -1,4 +1,4 @@
-name: Build dylib
+name: Build dylib — SDK verified
 
 on:
   workflow_dispatch:
@@ -29,31 +29,67 @@ jobs:
 
     env:
       THEOS: ${{ github.workspace }}/theos
-      # Pinned so a future Theos or SDK update cannot silently change a build.
-      # Update this deliberately after validating the project against the new revision.
       THEOS_COMMIT: 16362d3aa83a0acd56df4493d575d34306d42478
+      SDK_RELEASE_TAG: master-146e41f
+      SDK_ARCHIVE: iPhoneOS16.5.sdk.tar.xz
+      SDK_DIRECTORY: iPhoneOS16.5.sdk
 
     steps:
+      - name: Confirm workflow revision
+        run: echo "Running SDK-verified workflow revision 2"
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache pinned Theos toolchain
-        id: theos-cache
+      - name: Cache pinned Theos toolchain and SDK
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ github.workspace }}/theos
-          key: theos-${{ runner.os }}-${{ env.THEOS_COMMIT }}
+          key: theos-${{ runner.os }}-${{ env.THEOS_COMMIT }}-${{ env.SDK_RELEASE_TAG }}-${{ env.SDK_ARCHIVE }}
 
-      - name: Install pinned Theos and SDK submodules
-        if: steps.theos-cache.outputs.cache-hit != 'true'
+      - name: Ensure pinned Theos installation
         run: |
           set -euo pipefail
-          rm -rf "$THEOS"
-          git init "$THEOS"
-          git -C "$THEOS" remote add origin https://github.com/theos/theos.git
-          git -C "$THEOS" fetch --depth 1 origin "$THEOS_COMMIT"
-          git -C "$THEOS" checkout --detach FETCH_HEAD
-          git -C "$THEOS" submodule update --init --recursive --depth 1
+
+          INSTALLED_COMMIT=""
+          if [ -d "$THEOS/.git" ]; then
+            INSTALLED_COMMIT="$(git -C "$THEOS" rev-parse HEAD 2>/dev/null || true)"
+          fi
+
+          if [ "$INSTALLED_COMMIT" != "$THEOS_COMMIT" ]; then
+            rm -rf "$THEOS"
+            git init "$THEOS"
+            git -C "$THEOS" remote add origin https://github.com/theos/theos.git
+            git -C "$THEOS" fetch --depth 1 origin "$THEOS_COMMIT"
+            git -C "$THEOS" checkout --detach FETCH_HEAD
+            git -C "$THEOS" submodule update --init --recursive --depth 1
+          fi
+
+          test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_COMMIT"
+
+      - name: Ensure pinned iOS 16.5 SDK
+        run: |
+          set -euo pipefail
+
+          SDK_PATH="$THEOS/sdks/$SDK_DIRECTORY"
+          if [ ! -d "$SDK_PATH" ]; then
+            mkdir -p "$THEOS/sdks"
+            rm -rf "$SDK_PATH"
+
+            SDK_DOWNLOAD="$RUNNER_TEMP/$SDK_ARCHIVE"
+            curl --fail --location --retry 3 \
+              "https://github.com/theos/sdks/releases/download/$SDK_RELEASE_TAG/$SDK_ARCHIVE" \
+              --output "$SDK_DOWNLOAD"
+
+            tar -xJf "$SDK_DOWNLOAD" -C "$THEOS/sdks"
+            rm -f "$SDK_DOWNLOAD"
+          fi
+
+          if [ ! -d "$SDK_PATH" ]; then
+            echo "::error::Required SDK was not installed at $SDK_PATH"
+            find "$THEOS/sdks" -maxdepth 1 -mindepth 1 -print | sort || true
+            exit 1
+          fi
 
       - name: Install ldid
         run: brew list ldid >/dev/null 2>&1 || brew install ldid
@@ -63,8 +99,10 @@ jobs:
           set -euo pipefail
           echo "THEOS=$THEOS"
           echo "Theos commit: $(git -C "$THEOS" rev-parse HEAD)"
+          echo "SDK: $THEOS/sdks/$SDK_DIRECTORY"
           test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_COMMIT"
-          ls "$THEOS/sdks"
+          test -d "$THEOS/sdks/$SDK_DIRECTORY"
+          ls -la "$THEOS/sdks/$SDK_DIRECTORY" | head -50
 
       - name: Build
         run: |
@@ -79,7 +117,7 @@ jobs:
           DYLIB="$(find .theos/obj -name 'ZImmortalizerJailed.dylib' -print -quit)"
           if [ -z "$DYLIB" ]; then
             echo "::error::Build finished but ZImmortalizerJailed.dylib was not found under .theos/obj"
-            find .theos -maxdepth 3 -type f | sort
+            find .theos -maxdepth 3 -type f | sort || true
             exit 1
           fi
           echo "Found dylib at $DYLIB"
